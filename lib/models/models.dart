@@ -17,22 +17,6 @@ class RouterConnection {
   String get baseUrl => '${useHttps ? 'https' : 'http'}://$host:$port';
 
   String get displayName => '${username.isEmpty ? 'root' : username}@$host';
-
-  RouterConnection copyWith({
-    String? host,
-    int? port,
-    String? username,
-    String? password,
-    bool? useHttps,
-  }) {
-    return RouterConnection(
-      host: host ?? this.host,
-      port: port ?? this.port,
-      username: username ?? this.username,
-      password: password ?? this.password,
-      useHttps: useHttps ?? this.useHttps,
-    );
-  }
 }
 
 /// 系统信息（ubus system info + system board）。
@@ -127,6 +111,26 @@ class WifiInfo {
   List<WifiClient> clients = [];
 
   String get signalDisplay => signal == 0 ? '—' : '$signal dBm';
+}
+
+/// /etc/config/wireless 中的一个 wifi-iface（AP）配置。
+class WirelessConfig {
+  String sid = '';
+  String ssid = '';
+  String key = '';
+  String encryption = 'none';
+  String device = '—';
+  bool disabled = false;
+
+  String get title => ssid.trim().isEmpty ? '(未设置名称)' : ssid;
+
+  String get subtitle {
+    final buffer = StringBuffer(device.isEmpty ? '—' : device);
+    buffer.write(' · ');
+    buffer.write(encryption.isEmpty ? 'none' : encryption);
+    if (disabled) buffer.write(' · 已禁用');
+    return buffer.toString();
+  }
 }
 
 /// 服务 / 插件信息（合并 ubus service list 与 rc list）。

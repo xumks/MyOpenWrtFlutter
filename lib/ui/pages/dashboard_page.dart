@@ -11,11 +11,14 @@ import '../widgets/glass.dart';
 class DashboardPage extends StatefulWidget {
   const DashboardPage({
     super.key,
+    this.active = true,
     required this.onOpenSettings,
     required this.onOpenServices,
     required this.onOpenOpenClash,
   });
 
+  /// 当前是否为可见标签页；从其他标签返回时自动刷新。
+  final bool active;
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenServices;
   final VoidCallback onOpenOpenClash;
@@ -35,6 +38,14 @@ class _DashboardPageState extends State<DashboardPage> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant DashboardPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) {
+      _load();
+    }
   }
 
   Future<void> _load() async {

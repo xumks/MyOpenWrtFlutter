@@ -224,7 +224,12 @@ class RouterApi {
 
   Future<SystemInfo> getSystemInfo() async {
     final info = SystemInfo();
-    final sys = await call('system', 'info') ?? <String, dynamic>{};
+    // system info 与 board 互不依赖，并发请求以缩短首屏等待
+    final sysFuture = call('system', 'info');
+    final boardFuture = call('system', 'board')
+        .then<Map<String, dynamic>>((v) => v ?? <String, dynamic>{})
+        .catchError((Object _) => <String, dynamic>{});
+    final sys = await sysFuture ?? <String, dynamic>{};
 
     info.uptime = _asInt(sys['uptime']);
     final load = sys['load'];
@@ -251,8 +256,9 @@ class RouterApi {
       info.swapFree = _asInt(swap['free']);
     }
 
-    try {
-      final board = await call('system', 'board') ?? <String, dynamic>{};
+    // board 为可选信息，失败时保持默认值
+    final board = await boardFuture;
+    if (board.isNotEmpty) {
       info.model = (board['model'] ?? '—').toString();
       info.boardName = (board['board_name'] ?? '—').toString();
       info.hostname = (board['hostname'] ?? 'OpenWrt').toString();
@@ -262,8 +268,6 @@ class RouterApi {
         info.release = (release['version'] ?? '—').toString();
         info.revision = (release['revision'] ?? '—').toString();
       }
-    } catch (_) {
-      // board 为可选信息
     }
     return info;
   }
@@ -278,7 +282,12 @@ class RouterApi {
 
   Future<List<NetworkInterfaceInfo>> getNetworkInterfaces() async {
     final list = <NetworkInterfaceInfo>[];
-    final data = await call('network.interface', 'dump') ?? <String, dynamic>{};
+    // dump 与 /proc/net/dev 相互独立，并发请求减少一次往返
+    final dumpFuture = call('network.interface', 'dump');
+    final devFuture = call('file', 'read', params: {'path': '/proc/net/dev'})
+        .then<Map<String, dynamic>>((v) => v ?? <String, dynamic>{})
+        .catchError((Object _) => <String, dynamic>{});
+    final data = await dumpFuture ?? <String, dynamic>{};
     final interfaces = data['interface'];
     if (interfaces is List) {
       for (final raw in interfaces) {
@@ -313,17 +322,15 @@ class RouterApi {
     }
 
     // 用 /proc/net/dev 补全流量统计
-    try {
-      final dev = await call('file', 'read', params: {'path': '/proc/net/dev'});
-      final parsed = _parseProcNetDev((dev?['data'] ?? '').toString());
-      for (final ni in list) {
-        final st = parsed[ni.device] ?? parsed[ni.name];
-        if (st != null) {
-          ni.rxBytes = st[0];
-          ni.txBytes = st[1];
-        }
+    final dev = await devFuture;
+    final parsed = _parseProcNetDev((dev['data'] ?? '').toString());
+    for (final ni in list) {
+      final st = parsed[ni.device] ?? parsed[ni.name];
+      if (st != null) {
+        ni.rxBytes = st[0];
+        ni.txBytes = st[1];
       }
-    } catch (_) {}
+    }
     return list;
   }
 
@@ -355,6 +362,11 @@ class RouterApi {
     final list = <DhcpLease>[];
     final byMac = <String, DhcpLease>{};
 
+    // 租约文件、dhcp 与 firewall 配置互不依赖，并发读取
+    final hostsFuture = readUciConfig('dhcp')
+        .catchError((Object _) => <String, Map<String, String>>{});
+    final rulesFuture = readUciConfig('firewall')
+        .catchError((Object _) => <String, Map<String, String>>{});
     final data = await call('file', 'read', params: {'path': '/tmp/dhcp.leases'});
     final content = (data?['data'] ?? '').toString();
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -376,57 +388,53 @@ class RouterApi {
     }
 
     // 静态租约（/etc/config/dhcp host 段）
-    try {
-      final hosts = await readUciConfig('dhcp');
-      for (final entry in hosts.entries) {
-        final sec = entry.value;
-        if (sec['.type'] != 'host') continue;
-        final mac = (sec['mac'] ?? '').trim();
-        if (mac.isEmpty) continue;
-        final ip = (sec['ip'] ?? '').trim();
-        final key = mac.toLowerCase();
+    final hosts = await hostsFuture;
+    for (final entry in hosts.entries) {
+      final sec = entry.value;
+      if (sec['.type'] != 'host') continue;
+      final mac = (sec['mac'] ?? '').trim();
+      if (mac.isEmpty) continue;
+      final ip = (sec['ip'] ?? '').trim();
+      final key = mac.toLowerCase();
+      var lease = byMac[key];
+      if (lease == null) {
+        lease = DhcpLease()
+          ..mac = mac
+          ..ip = ip
+          ..hostname = sec['name'] ?? ''
+          ..expires = 0;
+        list.add(lease);
+        byMac[key] = lease;
+      }
+      lease.staticSid = entry.key;
+      lease.staticIp = ip;
+      if (lease.ip.isEmpty) lease.ip = ip;
+    }
+
+    // 防火墙拉黑规则
+    final rules = await rulesFuture;
+    for (final entry in rules.entries) {
+      final sec = entry.value;
+      if (sec['.type'] != 'rule') continue;
+      final target = (sec['target'] ?? '').toUpperCase();
+      if (target != 'DROP' && target != 'REJECT') continue;
+      final macs = sec['src_mac'];
+      if (macs == null) continue;
+      for (final m in macs.trim().split(RegExp(r'\s+'))) {
+        if (m.isEmpty) continue;
+        final key = m.toLowerCase();
         var lease = byMac[key];
         if (lease == null) {
           lease = DhcpLease()
-            ..mac = mac
-            ..ip = ip
-            ..hostname = sec['name'] ?? ''
+            ..mac = m
             ..expires = 0;
           list.add(lease);
           byMac[key] = lease;
         }
-        lease.staticSid = entry.key;
-        lease.staticIp = ip;
-        if (lease.ip.isEmpty) lease.ip = ip;
+        lease.blocked = true;
+        lease.blockSid = entry.key;
       }
-    } catch (_) {}
-
-    // 防火墙拉黑规则
-    try {
-      final rules = await readUciConfig('firewall');
-      for (final entry in rules.entries) {
-        final sec = entry.value;
-        if (sec['.type'] != 'rule') continue;
-        final target = (sec['target'] ?? '').toUpperCase();
-        if (target != 'DROP' && target != 'REJECT') continue;
-        final macs = sec['src_mac'];
-        if (macs == null) continue;
-        for (final m in macs.trim().split(RegExp(r'\s+'))) {
-          if (m.isEmpty) continue;
-          final key = m.toLowerCase();
-          var lease = byMac[key];
-          if (lease == null) {
-            lease = DhcpLease()
-              ..mac = m
-              ..expires = 0;
-            list.add(lease);
-            byMac[key] = lease;
-          }
-          lease.blocked = true;
-          lease.blockSid = entry.key;
-        }
-      }
-    } catch (_) {}
+    }
     return list;
   }
 
@@ -504,18 +512,23 @@ class RouterApi {
   // ============================ WiFi ============================
 
   Future<List<WifiInfo>> getWifiInfo() async {
-    final list = <WifiInfo>[];
     var got = false;
     try {
       final devices = await call('iwinfo', 'devices');
-      if (devices != null) {
-        for (final key in devices.keys) {
-          got = true;
-          final wifi = WifiInfo()..ifname = key;
-          try {
-            final info =
-                await call('iwinfo', 'info', params: {'device': key}) ??
-                    <String, dynamic>{};
+      if (devices != null && devices.isNotEmpty) {
+        // 各射频互不依赖，并发读取 info 与 assoclist
+        final items = await Future.wait(devices.keys.map((key) async {
+          final wifi = WifiInfo()..ifname = key.toString();
+          final infoFuture = call('iwinfo', 'info',
+                  params: {'device': key.toString()})
+              .catchError((Object _) => null);
+          final assocFuture = call('iwinfo', 'assoclist',
+                  params: {'device': key.toString()})
+              .catchError((Object _) => null);
+
+          final info = await infoFuture;
+          if (info != null) {
+            got = true;
             wifi.ssid = (info['ssid'] ?? '—').toString();
             wifi.mode = (info['mode'] ?? '—').toString();
             wifi.channel = (info['channel'] ?? '—').toString();
@@ -527,76 +540,73 @@ class RouterApi {
                   (enc['encryption'] ?? enc['description'] ?? '—').toString();
             }
             wifi.signal = _asInt(info['signal']);
-          } catch (_) {}
-          try {
-            final assoc = await call('iwinfo', 'assoclist',
-                params: {'device': key});
-            final results = assoc?['results'];
-            if (results is Map) {
-              results.forEach((mac, value) {
-                if (value is! Map) return;
-                wifi.clients.add(WifiClient()
-                  ..mac = mac.toString()
-                  ..signal = _asInt(value['signal'])
-                  ..connectedTime = (value['connected_time'] ?? '—').toString()
-                  ..hostname = (value['hostname'] ?? '').toString());
-              });
-            }
-          } catch (_) {}
-          list.add(wifi);
-        }
+          }
+
+          final assoc = await assocFuture;
+          final results = assoc?['results'];
+          if (results is Map) {
+            results.forEach((mac, value) {
+              if (value is! Map) return;
+              wifi.clients.add(WifiClient()
+                ..mac = mac.toString()
+                ..signal = _asInt(value['signal'])
+                ..connectedTime = (value['connected_time'] ?? '—').toString()
+                ..hostname = (value['hostname'] ?? '').toString());
+            });
+          }
+          return wifi;
+        }));
+        if (got) return items;
       }
     } catch (_) {}
 
-    if (!got) return _parseWifiViaExec();
-    return list;
+    // 设备列表不可用或所有射频 info 均失败时，回退到命令输出。
+    return _parseWifiViaExec();
   }
 
   Future<List<WifiInfo>> _parseWifiViaExec() async {
     final list = <WifiInfo>[];
-    try {
-      final text = await _execIwinfo(const []);
-      final blocks = text.split(RegExp(r'\n\s*\n'));
-      final header = RegExp(r'^(\S+)\s+ESSID:\s*"?([^"]*)"?');
-      final channel = RegExp(r'Channel:\s*(\d+)');
-      final signal = RegExp(r'Signal:\s*(-?\d+)\s*dBm');
-      final enc = RegExp(r'Encryption:\s*(.+)$', multiLine: true);
-      final mode = RegExp(r'Mode:\s*(\w+)');
+    final text = await _execIwinfo(const []);
+    final blocks = text.split(RegExp(r'\n\s*\n'));
+    final header = RegExp(r'^(\S+)\s+ESSID:\s*"?([^"]*)"?');
+    final channel = RegExp(r'Channel:\s*(\d+)');
+    final signal = RegExp(r'Signal:\s*(-?\d+)\s*dBm');
+    final enc = RegExp(r'Encryption:\s*(.+)$', multiLine: true);
+    final mode = RegExp(r'Mode:\s*(\w+)');
 
-      for (var block in blocks) {
-        block = block.trim();
-        if (block.isEmpty) continue;
-        final mh = header.firstMatch(block);
-        if (mh == null) continue;
-        final w = WifiInfo()
-          ..ifname = mh.group(1) ?? ''
-          ..ssid = mh.group(2) ?? '';
-        final mc = channel.firstMatch(block);
-        if (mc != null) w.channel = mc.group(1)!;
-        final ms = signal.firstMatch(block);
-        if (ms != null) w.signal = int.tryParse(ms.group(1)!) ?? 0;
-        final me = enc.firstMatch(block);
-        if (me != null) w.encryption = me.group(1)!.trim();
-        final mm = mode.firstMatch(block);
-        if (mm != null) w.mode = mm.group(1)!;
-        w.up = w.channel != '—' || w.ssid.isNotEmpty;
-        list.add(w);
-      }
+    for (var block in blocks) {
+      block = block.trim();
+      if (block.isEmpty) continue;
+      final mh = header.firstMatch(block);
+      if (mh == null) continue;
+      final w = WifiInfo()
+        ..ifname = mh.group(1) ?? ''
+        ..ssid = mh.group(2) ?? '';
+      final mc = channel.firstMatch(block);
+      if (mc != null) w.channel = mc.group(1)!;
+      final ms = signal.firstMatch(block);
+      if (ms != null) w.signal = int.tryParse(ms.group(1)!) ?? 0;
+      final me = enc.firstMatch(block);
+      if (me != null) w.encryption = me.group(1)!.trim();
+      final mm = mode.firstMatch(block);
+      if (mm != null) w.mode = mm.group(1)!;
+      w.up = w.channel != '—' || w.ssid.isNotEmpty;
+      list.add(w);
+    }
 
-      for (final w in list) {
-        try {
-          final assoc = await _execIwinfo([w.ifname, 'assoclist']);
-          final mac = RegExp(
-              r'^([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(-?\d+)\s*dBm',
-              multiLine: true);
-          for (final m in mac.allMatches(assoc)) {
-            w.clients.add(WifiClient()
-              ..mac = m.group(1) ?? ''
-              ..signal = int.tryParse(m.group(2) ?? '') ?? 0);
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
+    for (final w in list) {
+      try {
+        final assoc = await _execIwinfo([w.ifname, 'assoclist']);
+        final mac = RegExp(
+            r'^([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(-?\d+)\s*dBm',
+            multiLine: true);
+        for (final m in mac.allMatches(assoc)) {
+          w.clients.add(WifiClient()
+            ..mac = m.group(1) ?? ''
+            ..signal = int.tryParse(m.group(2) ?? '') ?? 0);
+        }
+      } catch (_) {}
+    }
     return list;
   }
 
@@ -608,11 +618,76 @@ class RouterApi {
     return (data?['stdout'] ?? '').toString();
   }
 
+  // ============================ WiFi 名称 / 密码 ============================
+
+  /// 读取所有 AP 模式的无线配置（/etc/config/wireless）。
+  Future<List<WirelessConfig>> getWirelessConfigs() async {
+    final list = <WirelessConfig>[];
+    final sections = await readUciConfig('wireless');
+    for (final entry in sections.entries) {
+      final sec = entry.value;
+      if (sec['.type'] != 'wifi-iface') continue;
+      final mode = (sec['mode'] ?? '').trim();
+      if (mode.isNotEmpty && mode.toLowerCase() != 'ap') continue;
+
+      list.add(WirelessConfig()
+        ..sid = entry.key
+        ..ssid = sec['ssid'] ?? ''
+        ..key = sec['key'] ?? ''
+        ..encryption = _firstNonEmpty([sec['encryption'], 'none']) ?? 'none'
+        ..device = _firstNonEmpty([sec['device'], sec['ifname'], '—']) ?? '—'
+        ..disabled = _truthy(sec['disabled']));
+    }
+    return list;
+  }
+
+  /// 修改 AP 的 SSID 与密码（key 为空表示保持原密码），随后异步重载无线配置。
+  Future<void> updateWirelessConfig(String sid, String ssid, String key) async {
+    if (sid.isEmpty) throw ApiException('无线配置无效');
+    final newSsid = ssid.trim();
+    if (newSsid.isEmpty) throw ApiException('请输入 WiFi 名称');
+    if (newSsid.length > 32) throw ApiException('WiFi 名称不能超过 32 个字符');
+
+    final newKey = key;
+    if (newKey.isNotEmpty && !_isValidWifiKey(newKey)) {
+      throw ApiException('密码需为 8-63 位字符，或 64 位十六进制');
+    }
+
+    String? encryption;
+    try {
+      final sections = await readUciConfig('wireless');
+      encryption = sections[sid]?['encryption'];
+    } catch (_) {}
+
+    await _execUci(['set', 'wireless.$sid.ssid=$newSsid']);
+    if (newKey.isNotEmpty) {
+      await _execUci(['set', 'wireless.$sid.key=$newKey']);
+      if (encryption == null ||
+          encryption.isEmpty ||
+          encryption.toLowerCase() == 'none') {
+        await _execUci(['set', 'wireless.$sid.encryption=psk2']);
+      }
+    }
+    await _execUci(['commit', 'wireless']);
+    // 异步重载，避免本机正好连着该 WiFi 时请求被中断而误报失败
+    await execShell(
+      '(/sbin/wifi reload || /etc/init.d/network reload) >/dev/null 2>&1 &',
+    );
+  }
+
+  static bool _isValidWifiKey(String key) {
+    if (key.length >= 8 && key.length <= 63) return true;
+    return key.length == 64 && RegExp(r'^[0-9A-Fa-f]{64}$').hasMatch(key);
+  }
+
   // ============================ 服务 ============================
 
   Future<List<ServiceInfo>> getServices() async {
-    final services = await call('service', 'list') ?? <String, dynamic>{};
-    final rc = await call('rc', 'list') ?? <String, dynamic>{};
+    // service list 与 rc list 相互独立，并发请求减少等待
+    final servicesFuture = call('service', 'list');
+    final rcFuture = call('rc', 'list');
+    final services = await servicesFuture ?? <String, dynamic>{};
+    final rc = await rcFuture ?? <String, dynamic>{};
 
     final names = <String>{};
     names.addAll(rc.keys);
@@ -684,6 +759,10 @@ class RouterApi {
   // ============================ OpenClash ============================
 
   Future<OpenClashConfig> getOpenClash() async {
+    // 运行状态与配置读取互不依赖，并发请求
+    final rcFuture = call('rc', 'list')
+        .then<Map<String, dynamic>>((v) => v ?? <String, dynamic>{})
+        .catchError((Object _) => <String, dynamic>{});
     final sections = await readUciConfig('openclash');
     if (sections.isEmpty) {
       throw ApiException('未检测到 OpenClash（未找到 /etc/config/openclash）');
@@ -732,11 +811,9 @@ class RouterApi {
           current.toLowerCase() == s.name!.toLowerCase();
     }
 
-    try {
-      final rc = await call('rc', 'list');
-      final entry = rc?['openclash'];
-      if (entry is Map) oc.running = entry['running'] == true;
-    } catch (_) {}
+    final rc = await rcFuture;
+    final entry = rc['openclash'];
+    if (entry is Map) oc.running = entry['running'] == true;
     return oc;
   }
 

@@ -21,9 +21,15 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
+  /// 已访问过的标签页；首次访问才创建，之后复用状态避免重复请求路由器。
+  final Set<int> _visited = <int>{0};
+
   void _select(int index) {
     if (index == _index) return;
-    setState(() => _index = index);
+    setState(() {
+      _index = index;
+      _visited.add(index);
+    });
   }
 
   void _openServices() {
@@ -38,20 +44,21 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  Widget _buildPage() {
-    switch (_index) {
+  Widget _buildPage(int index) {
+    switch (index) {
       case 0:
         return DashboardPage(
+          active: _index == 0,
           onOpenSettings: () => _select(4),
           onOpenServices: _openServices,
           onOpenOpenClash: _openOpenClash,
         );
       case 1:
-        return const NetworkPage();
+        return NetworkPage(active: _index == 1);
       case 2:
-        return const DevicesPage();
+        return DevicesPage(active: _index == 2);
       case 3:
-        return const WifiPage();
+        return WifiPage(active: _index == 3);
       default:
         return const SettingsPage();
     }
@@ -66,7 +73,15 @@ class _HomeShellState extends State<HomeShell> {
         children: [
           const Positioned.fill(child: AuroraBackground()),
           Positioned.fill(
-            child: KeyedSubtree(key: ValueKey(_index), child: _buildPage()),
+            child: IndexedStack(
+              index: _index,
+              children: List.generate(
+                5,
+                (i) => _visited.contains(i)
+                    ? _buildPage(i)
+                    : const SizedBox.shrink(),
+              ),
+            ),
           ),
         ],
       ),

@@ -11,7 +11,10 @@ import '../widgets/glass.dart';
 
 /// 网络接口页：状态、地址、流量与实时速率。
 class NetworkPage extends StatefulWidget {
-  const NetworkPage({super.key});
+  const NetworkPage({super.key, this.active = true});
+
+  /// 当前是否为可见标签页；不可见时停止定时轮询，避免无谓请求。
+  final bool active;
 
   @override
   State<NetworkPage> createState() => _NetworkPageState();
@@ -24,13 +27,33 @@ class _NetworkPageState extends State<NetworkPage> {
   final Map<String, ({int rx, int tx, int ms})> _prev = {};
   String? _error;
   bool _loading = true;
+  bool _refreshing = false;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
     _refresh();
-    _timer = Timer.periodic(const Duration(seconds: 4), (_) => _refresh(silent: true));
+    if (widget.active) _startTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant NetworkPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) {
+      _startTimer();
+      _refresh(silent: true);
+    } else if (!widget.active && oldWidget.active) {
+      _timer?.cancel();
+      _timer = null;
+    }
+  }
+
+  void _startTimer() {
+    _timer ??= Timer.periodic(
+      const Duration(seconds: 4),
+      (_) => _refresh(silent: true),
+    );
   }
 
   @override
@@ -40,6 +63,8 @@ class _NetworkPageState extends State<NetworkPage> {
   }
 
   Future<void> _refresh({bool silent = false}) async {
+    if (_refreshing) return;
+    _refreshing = true;
     if (!silent) {
       setState(() {
         _loading = true;
@@ -72,6 +97,8 @@ class _NetworkPageState extends State<NetworkPage> {
         _error = e is ApiException ? e.message : e.toString();
         _loading = false;
       });
+    } finally {
+      _refreshing = false;
     }
   }
 
@@ -145,6 +172,7 @@ class _NetworkPageState extends State<NetworkPage> {
     final dark = AppTheme.isDark(context);
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: dark ? const Color(0xFF161E30) : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
@@ -154,67 +182,69 @@ class _NetworkPageState extends State<NetworkPage> {
           top: false,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(22, 14, 22, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Container(
-                    width: 38,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: AppTheme.textSecondary(ctx).withValues(alpha: 0.3),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    StatusDot(active: ni.up, size: 10),
-                    const SizedBox(width: 8),
-                    Text(
-                      ni.name.toUpperCase(),
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 38,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: AppTheme.textSecondary(ctx).withValues(alpha: 0.3),
+                        borderRadius: BorderRadius.circular(2),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    BadgeChip(ni.up ? 'UP' : 'DOWN',
-                        color: ni.up
-                            ? const Color(0xFF27C281)
-                            : const Color(0xFF9AA3B2)),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                InfoRow('物理设备', ni.device),
-                InfoRow('协议', ni.proto),
-                InfoRow('IPv4', ni.ipv4Addr),
-                InfoRow('掩码', ni.ipv4Mask),
-                InfoRow('IPv6', ni.ipv6Addr),
-                InfoRow('MAC', ni.mac),
-                InfoRow('接收数据包', '${ni.rxPackets}'),
-                InfoRow('发送数据包', '${ni.txPackets}'),
-                InfoRow('累计接收', Fmt.bytes(ni.rxBytes)),
-                InfoRow('累计发送', Fmt.bytes(ni.txBytes)),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppTheme.primary,
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                    ),
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      _restart(ni.name);
-                    },
-                    icon: const Icon(Icons.restart_alt_rounded, size: 19),
-                    label: Text('重启接口 ${ni.name}'),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      StatusDot(active: ni.up, size: 10),
+                      const SizedBox(width: 8),
+                      Text(
+                        ni.name.toUpperCase(),
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      BadgeChip(ni.up ? 'UP' : 'DOWN',
+                          color: ni.up
+                              ? const Color(0xFF27C281)
+                              : const Color(0xFF9AA3B2)),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  InfoRow('物理设备', ni.device),
+                  InfoRow('协议', ni.proto),
+                  InfoRow('IPv4', ni.ipv4Addr),
+                  InfoRow('掩码', ni.ipv4Mask),
+                  InfoRow('IPv6', ni.ipv6Addr),
+                  InfoRow('MAC', ni.mac),
+                  InfoRow('接收数据包', '${ni.rxPackets}'),
+                  InfoRow('发送数据包', '${ni.txPackets}'),
+                  InfoRow('累计接收', Fmt.bytes(ni.rxBytes)),
+                  InfoRow('累计发送', Fmt.bytes(ni.txBytes)),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AppTheme.primary,
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _restart(ni.name);
+                      },
+                      icon: const Icon(Icons.restart_alt_rounded, size: 19),
+                      label: Text('重启接口 ${ni.name}'),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );

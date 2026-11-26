@@ -8,7 +8,10 @@ import '../widgets/glass.dart';
 
 /// 设备页：DHCP 租约、固定 IP 与拉黑。
 class DevicesPage extends StatefulWidget {
-  const DevicesPage({super.key});
+  const DevicesPage({super.key, this.active = true});
+
+  /// 当前是否为可见标签页；从其他标签返回时自动刷新。
+  final bool active;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -28,6 +31,14 @@ class _DevicesPageState extends State<DevicesPage> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant DevicesPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active && !_busy) {
+      _load();
+    }
   }
 
   @override
